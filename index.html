@@ -3,10 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <title>섬네일 일감 등록</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
         :root { --primary: #3b82f6; --bg: #f1f5f9; --dark: #0f172a; --accent: #059669; }
         body { font-family: 'Pretendard', sans-serif; margin: 0; background: var(--bg); padding-bottom: 50px; user-select: none; }
-        
+
         header { background: var(--dark); padding: 10px 20px; position: sticky; top: 0; z-index: 100; display: flex; align-items: center; gap: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.3); min-height: 50px; }
         .tab-btn { background: #334155; border: none; color: #94a3b8; padding: 10px 18px; cursor: pointer; border-radius: 6px; font-weight: bold; font-size: 14px; }
         .tab-btn.active { background: var(--primary); color: white; }
@@ -28,53 +29,239 @@
         table { border-collapse: collapse; width: 100%; min-width: 700px; table-layout: fixed; border: 1px solid #cbd5e1; outline: none; }
         th { background: #f1f5f9; border: 1px solid #cbd5e1; height: 38px; }
         th input { background: transparent; font-weight: bold; text-align: center; color: #1e40af; border: none; width: 100%; outline: none; }
-        
+
         td { border: 1px solid #e2e8f0; height: 32px; padding: 0; position: relative; }
         td input { width: 100%; height: 100%; border: none; padding: 0 8px; outline: none; font-size: 13px; box-sizing: border-box; background: transparent; cursor: text; }
 
-        /* 하이라이트 스타일: selected 클래스가 있을 때만 표시 */
         td.selected { background-color: rgba(59, 130, 246, 0.15) !important; box-shadow: inset 0 0 0 1px var(--primary); }
 
         .output-section { flex: 0.7; background: #0f172a; padding: 20px; display: flex; flex-direction: column; min-height: 300px; }
         .output-label { color: #38bdf8; font-size: 11px; font-weight: bold; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
         .result-area { flex-grow: 1; background: #020617; color: #e2e8f0; border: 1px solid #1e293b; padding: 15px; font-family: 'Consolas', monospace; font-size: 12px; border-radius: 6px; outline: none; line-height: 1.6; resize: vertical; }
         .copy-btn { background: #38bdf8; color: #020617; border: none; padding: 5px 12px; border-radius: 4px; font-size: 12px; cursor: pointer; font-weight: bold; }
+
+        .sync-badge {
+            position: fixed;
+            right: 18px;
+            bottom: 18px;
+            background: #0f172a;
+            color: #cbd5e1;
+            padding: 10px 14px;
+            border-radius: 10px;
+            font-size: 12px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+            z-index: 999;
+        }
+        .sync-badge.ok { color: #86efac; }
+        .sync-badge.saving { color: #fcd34d; }
+        .sync-badge.error { color: #fca5a5; }
     </style>
 </head>
 <body onmousedown="globalClearSelection(event)">
 
 <header onmousedown="event.stopPropagation()">
-    <div id="tab-list" style="display: flex; gap: 8px;"></div>
+    <div id="tab-list" style="display: flex; gap: 8px; flex-wrap: wrap;"></div>
     <button class="add-category-btn" onclick="addCategory()">+ 카테고리 추가</button>
     <button class="add-group-btn" onclick="addNewGroup()">+ 현재 탭에 표 추가</button>
 </header>
 
 <div id="master-container"></div>
+<div id="sync-status" class="sync-badge">동기화 대기중</div>
 
 <script>
     const STORAGE_KEY = 'GAME_MASTER_AUTO_CLEAR_V83';
+    const SUPABASE_URL = 'YOUR_SUPABASE_URL';
+    const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+    const STATE_ROW_ID = 'thumbnail-shared-state-v1';
+
+    const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
     let currentTab = "랜덤박스";
     let categoryData = ["랜덤박스", "선택박스"];
     let groupIdx = 0;
     let isDragging = false;
     let startCell = null;
 
-    window.onload = function() {
-        const saved = localStorage.getItem(STORAGE_KEY);
-        if (saved) {
-            try {
-                const data = JSON.parse(saved);
-                categoryData = data.categories || ["랜덤박스"];
-                currentTab = data.currentTab || categoryData[0];
-                renderTabs();
-                if (data.groups) data.groups.forEach(g => addNewGroup(g));
-            } catch(e) { renderTabs(); addNewGroup(); }
-        } else { renderTabs(); addNewGroup(); }
-        switchTab(currentTab);
+    let isApplyingRemoteState = false;
+    let saveTimer = null;
+    let channel = null;
+    let isBootstrapping = true;
+
+    window.onload = async function() {
+        await bootstrapApp();
         window.addEventListener('mouseup', () => { isDragging = false; });
     };
 
-    // [핵심 추가] 외부 영역 클릭 시 하이라이트 모두 제거
+    function setSyncStatus(type, text) {
+        const el = document.getElementById('sync-status');
+        el.className = `sync-badge ${type || ''}`.trim();
+        el.textContent = text;
+    }
+
+    async function bootstrapApp() {
+        setSyncStatus('', '공용 데이터 불러오는 중...');
+        const remoteLoaded = await loadRemoteState();
+
+        if (!remoteLoaded) {
+            const saved = localStorage.getItem(STORAGE_KEY);
+            if (saved) {
+                try {
+                    const data = JSON.parse(saved);
+                    applyState(data);
+                } catch (e) {
+                    renderTabs();
+                    addNewGroup();
+                }
+            } else {
+                renderTabs();
+                addNewGroup();
+            }
+            await saveRemoteState();
+        }
+
+        switchTab(currentTab);
+        subscribeRealtime();
+        isBootstrapping = false;
+        setSyncStatus('ok', '동기화 완료');
+    }
+
+    function getCurrentState() {
+        const gData = Array.from(document.querySelectorAll('.group-wrap')).map(g => ({
+            category: g.getAttribute('data-category'),
+            headers: Array.from(document.querySelectorAll(`#h-${g.id} input`)).map(i => i.value),
+            rows: Array.from(document.getElementById(`b-${g.id}`).rows).map(tr =>
+                Array.from(tr.querySelectorAll('input')).map(i => i.value)
+            )
+        }));
+
+        return {
+            categories: categoryData,
+            currentTab,
+            groups: gData
+        };
+    }
+
+    function applyState(data) {
+        isApplyingRemoteState = true;
+
+        document.getElementById('master-container').innerHTML = '';
+        groupIdx = 0;
+
+        categoryData = data?.categories?.length ? data.categories : ["랜덤박스"];
+        currentTab = data?.currentTab || categoryData[0];
+
+        renderTabs();
+
+        if (data?.groups?.length) {
+            data.groups.forEach(g => addNewGroup(g));
+        } else {
+            addNewGroup();
+        }
+
+        switchTab(currentTab);
+        saveToLocalOnly();
+
+        isApplyingRemoteState = false;
+    }
+
+    async function loadRemoteState() {
+        try {
+            const { data, error } = await supabaseClient
+                .from('shared_page_state')
+                .select('payload')
+                .eq('id', STATE_ROW_ID)
+                .maybeSingle();
+
+            if (error) {
+                console.error('원격 상태 불러오기 실패:', error);
+                setSyncStatus('error', '불러오기 실패');
+                return false;
+            }
+
+            if (data?.payload) {
+                applyState(data.payload);
+                setSyncStatus('ok', '공용 데이터 불러옴');
+                return true;
+            }
+
+            return false;
+        } catch (err) {
+            console.error('원격 상태 불러오기 예외:', err);
+            setSyncStatus('error', '불러오기 예외');
+            return false;
+        }
+    }
+
+    async function saveRemoteState() {
+        if (isApplyingRemoteState) return;
+
+        const payload = getCurrentState();
+        setSyncStatus('saving', '공용 저장 중...');
+
+        try {
+            const { error } = await supabaseClient
+                .from('shared_page_state')
+                .upsert({
+                    id: STATE_ROW_ID,
+                    payload,
+                    updated_at: new Date().toISOString()
+                });
+
+            if (error) {
+                console.error('원격 저장 실패:', error);
+                setSyncStatus('error', '공용 저장 실패');
+                return;
+            }
+
+            setSyncStatus('ok', '공용 저장 완료');
+        } catch (err) {
+            console.error('원격 저장 예외:', err);
+            setSyncStatus('error', '공용 저장 예외');
+        }
+    }
+
+    function scheduleRemoteSave() {
+        if (isApplyingRemoteState || isBootstrapping) return;
+
+        clearTimeout(saveTimer);
+        setSyncStatus('saving', '저장 예약 중...');
+        saveTimer = setTimeout(async () => {
+            saveToLocalOnly();
+            await saveRemoteState();
+        }, 500);
+    }
+
+    function saveToLocalOnly() {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(getCurrentState()));
+    }
+
+    function subscribeRealtime() {
+        if (channel) {
+            supabaseClient.removeChannel(channel);
+        }
+
+        channel = supabaseClient
+            .channel('shared-page-state-watch')
+            .on(
+                'postgres_changes',
+                {
+                    event: '*',
+                    schema: 'public',
+                    table: 'shared_page_state',
+                    filter: `id=eq.${STATE_ROW_ID}`
+                },
+                async () => {
+                    if (document.hidden) return;
+                    await loadRemoteState();
+                }
+            )
+            .subscribe((status) => {
+                if (status === 'SUBSCRIBED') {
+                    setSyncStatus('ok', '실시간 동기화 연결됨');
+                }
+            });
+    }
+
     function globalClearSelection(e) {
         if (!e.target.closest('td')) {
             document.querySelectorAll('td.selected').forEach(td => td.classList.remove('selected'));
@@ -87,8 +274,8 @@
         categoryData.forEach(cat => {
             const btn = document.createElement('button');
             btn.className = `tab-btn ${cat === currentTab ? 'active' : ''}`;
-            btn.innerHTML = `${cat}${categoryData.length > 1 ? `<span style="margin-left:8px;color:#f87171" onclick="deleteCategory(event, '${cat}')">✖</span>` : ''}`;
-            btn.onmousedown = (e) => e.stopPropagation(); // 탭 클릭 시 하이라이트 유지용
+            btn.innerHTML = `${cat}${categoryData.length > 1 ? `<span style="margin-left:8px;color:#f87171" onclick="deleteCategory(event, '${escapeForSingleQuote(cat)}')">✖</span>` : ''}`;
+            btn.onmousedown = (e) => e.stopPropagation();
             btn.onclick = () => switchTab(cat);
             tabList.appendChild(btn);
         });
@@ -111,8 +298,8 @@
         div.className = `group-wrap ${targetCategory === currentTab ? 'active-group' : ''}`;
         div.id = id;
         div.setAttribute('data-category', targetCategory);
-        div.onmousedown = (e) => e.stopPropagation(); // 그룹 내부 클릭 시 전역 클리어 방지
-        
+        div.onmousedown = (e) => e.stopPropagation();
+
         div.innerHTML = `
             <div class="main-layout">
                 <div class="input-section">
@@ -135,10 +322,16 @@
                 </div>
             </div>`;
         document.getElementById('master-container').appendChild(div);
+
         const hs = savedData ? savedData.headers : ["RES ID", "박스명", "상품명", "분류", "OBJ ID", "RES ID"];
-        document.getElementById(`h-${id}`).innerHTML = `<tr>${hs.map(h => `<th><input type="text" value="${h}" oninput="updateOutput('${id}')"></th>`).join('')}</tr>`;
-        if(savedData && savedData.rows) savedData.rows.forEach(r => addRow(id, r));
-        else for(let i=0; i<8; i++) addRow(id);
+        document.getElementById(`h-${id}`).innerHTML = `<tr>${hs.map(h => `<th><input type="text" value="${escapeHtml(h)}" oninput="updateOutput('${id}')"></th>`).join('')}</tr>`;
+
+        if (savedData && savedData.rows) {
+            savedData.rows.forEach(r => addRow(id, r));
+        } else {
+            for (let i = 0; i < 8; i++) addRow(id);
+        }
+
         updateOutput(id);
     }
 
@@ -146,7 +339,8 @@
         const body = document.getElementById(`b-${id}`);
         const colCount = document.querySelectorAll(`#h-${id} th`).length;
         const tr = document.createElement('tr');
-        for(let i=0; i<colCount; i++) {
+
+        for (let i = 0; i < colCount; i++) {
             const td = document.createElement('td');
             const input = document.createElement('input');
             input.type = "text";
@@ -156,9 +350,12 @@
             input.addEventListener('mouseenter', (e) => handleMouseEnter(e, id));
             input.addEventListener('keydown', (e) => handleKeyDown(e, id));
             input.addEventListener('paste', (e) => handlePaste(e, id));
-            td.appendChild(input); tr.appendChild(td);
+            td.appendChild(input);
+            tr.appendChild(td);
         }
-        body.appendChild(tr); updateOutput(id);
+
+        body.appendChild(tr);
+        updateOutput(id);
     }
 
     function handleMouseDown(e, id) {
@@ -166,8 +363,7 @@
         const td = e.target.closest('td');
         if (!td) return;
         startCell = { r: td.parentElement.rowIndex - 1, c: td.cellIndex };
-        
-        // 클릭 시 모든 하이라이트 제거 후 현재 클릭한 셀만 활성화
+
         document.querySelectorAll('td.selected').forEach(cell => cell.classList.remove('selected'));
         td.classList.add('selected');
     }
@@ -177,19 +373,18 @@
         const td = e.target.closest('td');
         if (!td) return;
         const endCell = { r: td.parentElement.rowIndex - 1, c: td.cellIndex };
-        
-        // 드래그 중에는 실시간으로 범위 하이라이트
+
         const tbody = document.getElementById(`b-${id}`);
         const allTds = document.querySelectorAll('td.selected');
         allTds.forEach(td => td.classList.remove('selected'));
-        
+
         const minR = Math.min(startCell.r, endCell.r), maxR = Math.max(startCell.r, endCell.r);
         const minC = Math.min(startCell.c, endCell.c), maxC = Math.max(startCell.c, endCell.c);
-        
+
         for (let i = minR; i <= maxR; i++) {
-            for (let j = minC; j <= maxC; j++) { 
+            for (let j = minC; j <= maxC; j++) {
                 const cell = tbody.rows[i]?.cells[j];
-                if (cell) cell.classList.add('selected'); 
+                if (cell) cell.classList.add('selected');
             }
         }
     }
@@ -206,6 +401,7 @@
             copySelectedArea(id, selectedCells);
             return;
         }
+
         if ((e.key === 'Backspace' || e.key === 'Delete') && selectedCells.length > 1) {
             e.preventDefault();
             selectedCells.forEach(cell => { cell.querySelector('input').value = ''; });
@@ -213,41 +409,48 @@
             return;
         }
 
-        // 방향키/엔터 이동 시 하이라이트 동기화 로직
         let target = null;
-        if (e.key === 'ArrowUp' && rowIdx > 0) target = tbody.rows[rowIdx-1].cells[colIdx];
-        else if ((e.key === 'ArrowDown' || e.key === 'Enter') && rowIdx < tbody.rows.length-1) {
-            e.preventDefault(); target = tbody.rows[rowIdx+1].cells[colIdx];
+        if (e.key === 'ArrowUp' && rowIdx > 0) target = tbody.rows[rowIdx - 1].cells[colIdx];
+        else if ((e.key === 'ArrowDown' || e.key === 'Enter') && rowIdx < tbody.rows.length - 1) {
+            e.preventDefault();
+            target = tbody.rows[rowIdx + 1].cells[colIdx];
         }
-        else if (e.key === 'Enter' && rowIdx === tbody.rows.length-1) {
-            e.preventDefault(); addRow(id); target = tbody.rows[rowIdx+1].cells[colIdx];
+        else if (e.key === 'Enter' && rowIdx === tbody.rows.length - 1) {
+            e.preventDefault();
+            addRow(id);
+            target = tbody.rows[rowIdx + 1].cells[colIdx];
         }
-        else if (e.key === 'ArrowLeft' && input.selectionStart === 0 && colIdx > 0) target = tr.cells[colIdx-1];
-        else if (e.key === 'ArrowRight' && input.selectionEnd === input.value.length && colIdx < tr.cells.length-1) target = tr.cells[colIdx+1];
+        else if (e.key === 'ArrowLeft' && input.selectionStart === 0 && colIdx > 0) target = tr.cells[colIdx - 1];
+        else if (e.key === 'ArrowRight' && input.selectionEnd === input.value.length && colIdx < tr.cells.length - 1) target = tr.cells[colIdx + 1];
 
         if (target) {
-            // 이동 시 기존 하이라이트 싹 지우고 새 타겟에만 부여
             document.querySelectorAll('td.selected').forEach(c => c.classList.remove('selected'));
             target.classList.add('selected');
-            
+
             const nextInp = target.querySelector('input');
-            nextInp.focus(); setTimeout(() => nextInp.select(), 0);
+            nextInp.focus();
+            setTimeout(() => nextInp.select(), 0);
         }
     }
 
-    // --- 나머지 유틸리티 로직 (이전과 동일) ---
     function copySelectedArea(id, cells) {
         const rows = document.getElementById(`b-${id}`).rows;
         let minR = Infinity, maxR = -Infinity, minC = Infinity, maxC = -Infinity;
+
         cells.forEach(cell => {
             const r = cell.parentElement.rowIndex - 1, c = cell.cellIndex;
-            minR = Math.min(minR, r); maxR = Math.max(maxR, r);
-            minC = Math.min(minC, c); maxC = Math.max(maxC, c);
+            minR = Math.min(minR, r);
+            maxR = Math.max(maxR, r);
+            minC = Math.min(minC, c);
+            maxC = Math.max(maxC, c);
         });
+
         let copyStr = "";
         for (let i = minR; i <= maxR; i++) {
             let rowData = [];
-            for (let j = minC; j <= maxC; j++) { rowData.push(rows[i].cells[j].querySelector('input').value); }
+            for (let j = minC; j <= maxC; j++) {
+                rowData.push(rows[i].cells[j].querySelector('input').value);
+            }
             copyStr += rowData.join('\t') + (i === maxR ? "" : "\n");
         }
         navigator.clipboard.writeText(copyStr);
@@ -257,10 +460,12 @@
         const hs = Array.from(document.querySelectorAll(`#h-${id} input`)).map(i => i.value);
         const rows = document.getElementById(`b-${id}`).rows;
         let res = `|${hs.join('|')}|\n`;
-        for(let tr of rows) {
+
+        for (let tr of rows) {
             const vals = Array.from(tr.querySelectorAll('input')).map(i => i.value);
-            if(vals.some(v => v.trim() !== '')) res += `|${vals.join('|')}|\n`;
+            if (vals.some(v => v.trim() !== '')) res += `|${vals.join('|')}|\n`;
         }
+
         document.getElementById(`out-${id}`).value = res;
         saveToLocal();
     }
@@ -271,26 +476,28 @@
         const rows = text.split(/\r\n|\n|\r/);
         const startTd = e.target.closest('td');
         const startRowIdx = startTd.parentElement.rowIndex - 1, startColIdx = startTd.cellIndex;
+
         rows.forEach((rowText, rOffset) => {
-            if(!rowText.trim() && rOffset !== 0) return;
+            if (!rowText.trim() && rOffset !== 0) return;
             const cols = rowText.split('\t');
             let targetTr = document.getElementById(`b-${id}`).rows[startRowIdx + rOffset];
-            if(!targetTr && rowText.trim()) { addRow(id); targetTr = document.getElementById(`b-${id}`).rows[startRowIdx + rOffset]; }
+
+            if (!targetTr && rowText.trim()) {
+                addRow(id);
+                targetTr = document.getElementById(`b-${id}`).rows[startRowIdx + rOffset];
+            }
+
             cols.forEach((val, cOffset) => {
                 const targetTd = targetTr?.cells[startColIdx + cOffset];
-                if(targetTd) targetTd.querySelector('input').value = val;
+                if (targetTd) targetTd.querySelector('input').value = val;
             });
         });
+
         updateOutput(id);
     }
 
     function saveToLocal() {
-        const gData = Array.from(document.querySelectorAll('.group-wrap')).map(g => ({
-            category: g.getAttribute('data-category'),
-            headers: Array.from(document.querySelectorAll(`#h-${g.id} input`)).map(i => i.value),
-            rows: Array.from(document.getElementById(`b-${g.id}`).rows).map(tr => Array.from(tr.querySelectorAll('input')).map(i => i.value))
-        }));
-        localStorage.setItem(STORAGE_KEY, JSON.stringify({ categories: categoryData, currentTab, groups: gData }));
+        scheduleRemoteSave();
     }
 
     function addCol(id) {
@@ -298,29 +505,84 @@
         document.querySelectorAll(`#b-${id} tr`).forEach(tr => {
             const td = document.createElement('td');
             const input = document.createElement('input');
-            input.type = "text"; input.oninput = () => updateOutput(id);
+            input.type = "text";
+            input.oninput = () => updateOutput(id);
             input.addEventListener('mousedown', (e) => { e.stopPropagation(); handleMouseDown(e, id); });
             input.addEventListener('mouseenter', (e) => handleMouseEnter(e, id));
             input.addEventListener('keydown', (e) => handleKeyDown(e, id));
             input.addEventListener('paste', (e) => handlePaste(e, id));
-            td.appendChild(input); tr.appendChild(td);
+            td.appendChild(input);
+            tr.appendChild(td);
         });
         updateOutput(id);
     }
 
     function deleteLastCol(id) {
         const hRow = document.querySelector(`#h-${id} tr`);
-        if(hRow.children.length > 1) {
+        if (hRow.children.length > 1) {
             hRow.removeChild(hRow.lastChild);
             document.querySelectorAll(`#b-${id} tr`).forEach(tr => tr.removeChild(tr.lastChild));
             updateOutput(id);
         }
     }
 
-    function deleteGroup(id) { if(confirm('표를 삭제하시겠습니까?')) { document.getElementById(id).remove(); saveToLocal(); } }
-    function copyText(id) { const el = document.getElementById(`out-${id}`); el.select(); document.execCommand('copy'); alert('복사되었습니다.'); }
-    function addCategory() { const name = prompt("새로운 카테고리 이름을 입력하세요:"); if (name && !categoryData.includes(name)) { categoryData.push(name); renderTabs(); switchTab(name); } }
-    function deleteCategory(e, name) { e.stopPropagation(); if (confirm(`'${name}' 카테고리를 삭제하시겠습니까?`)) { categoryData = categoryData.filter(c => c !== name); document.querySelectorAll(`.group-wrap[data-category="${name}"]`).forEach(g => g.remove()); if (currentTab === name) currentTab = categoryData[0]; renderTabs(); switchTab(currentTab); } }
+    function deleteGroup(id) {
+        if (confirm('표를 삭제하시겠습니까?')) {
+            document.getElementById(id).remove();
+            saveToLocal();
+        }
+    }
+
+    function copyText(id) {
+        const el = document.getElementById(`out-${id}`);
+        el.select();
+        document.execCommand('copy');
+        alert('복사되었습니다.');
+    }
+
+    function addCategory() {
+        const name = prompt("새로운 카테고리 이름을 입력하세요:");
+        if (name && !categoryData.includes(name)) {
+            categoryData.push(name);
+            renderTabs();
+            switchTab(name);
+        }
+    }
+
+    function deleteCategory(e, name) {
+        e.stopPropagation();
+        if (confirm(`'${name}' 카테고리를 삭제하시겠습니까?`)) {
+            categoryData = categoryData.filter(c => c !== name);
+            document.querySelectorAll(`.group-wrap[data-category="${cssEscape(name)}"]`).forEach(g => g.remove());
+            if (currentTab === name) currentTab = categoryData[0] || "기본";
+            renderTabs();
+            if (categoryData.length === 0) {
+                categoryData = ["기본"];
+                currentTab = "기본";
+                renderTabs();
+                addNewGroup();
+            }
+            switchTab(currentTab);
+        }
+    }
+
+    function escapeHtml(str) {
+        return String(str)
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;')
+            .replaceAll('"', '&quot;')
+            .replaceAll("'", '&#39;');
+    }
+
+    function escapeForSingleQuote(str) {
+        return String(str).replaceAll("\\", "\\\\").replaceAll("'", "\\'");
+    }
+
+    function cssEscape(str) {
+        if (window.CSS && CSS.escape) return CSS.escape(str);
+        return String(str).replace(/"/g, '\\"');
+    }
 </script>
 
 </body>
