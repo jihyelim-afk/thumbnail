@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>섬네일 일감 등록</title>
+    <style>
+        :root { --primary: #3b82f6; --bg: #f1f5f9; --dark: #0f172a; --accent: #059669; }
+        body { font-family: 'Pretendard', sans-serif; margin: 0; background: var(--bg); padding-bottom: 50px; user-select: none; }
+        
+        header { background: var(--dark); padding: 10px 20px; position: sticky; top: 0; z-index: 100; display: flex; align-items: center; gap: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.3); min-height: 50px; }
+        .tab-btn { background: #334155; border: none; color: #94a3b8; padding: 10px 18px; cursor: pointer; border-radius: 6px; font-weight: bold; font-size: 14px; }
+        .tab-btn.active { background: var(--primary); color: white; }
+        .add-category-btn { background: #475569; color: white; border: none; padding: 8px 12px; cursor: pointer; border-radius: 6px; font-size: 13px; }
+        .add-group-btn { background: var(--accent); color: white; border: none; padding: 10px 20px; cursor: pointer; border-radius: 6px; font-weight: bold; margin-left: auto; }
+
+        .group-wrap { background: white; margin: 20px auto; width: 96%; border-radius: 10px; border: 1px solid #cbd5e1; box-shadow: 0 4px 15px rgba(0,0,0,0.1); overflow: hidden; display: none; }
+        .group-wrap.active-group { display: block; }
+
+        .main-layout { display: flex; flex-direction: column; }
+        @media (min-width: 1200px) { .main-layout { flex-direction: row; } }
+
+        .input-section { flex: 1.3; border-right: 1px solid #e2e8f0; position: relative; }
+        .toolbar { padding: 12px 15px; background: #fff; display: flex; gap: 8px; align-items: center; border-bottom: 1px solid #f1f5f9; }
+        .btn-tool { padding: 6px 12px; font-size: 12px; cursor: pointer; border-radius: 4px; border: 1px solid #cbd5e1; background: white; }
+        .btn-del-group { background: #fee2e2; color: #dc2626; border: 1px solid #fecaca; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; margin-left: auto; }
+
+        .table-wrapper { overflow: auto; max-height: 550px; padding: 10px; background: #fff; }
+        table { border-collapse: collapse; width: 100%; min-width: 700px; table-layout: fixed; border: 1px solid #cbd5e1; outline: none; }
+        th { background: #f1f5f9; border: 1px solid #cbd5e1; height: 38px; }
+        th input { background: transparent; font-weight: bold; text-align: center; color: #1e40af; border: none; width: 100%; outline: none; }
+        
+        td { border: 1px solid #e2e8f0; height: 32px; padding: 0; position: relative; }
+        td input { width: 100%; height: 100%; border: none; padding: 0 8px; outline: none; font-size: 13px; box-sizing: border-box; background: transparent; cursor: text; }
+
+        /* 하이라이트 스타일: selected 클래스가 있을 때만 표시 */
+        td.selected { background-color: rgba(59, 130, 246, 0.15) !important; box-shadow: inset 0 0 0 1px var(--primary); }
+
+        .output-section { flex: 0.7; background: #0f172a; padding: 20px; display: flex; flex-direction: column; min-height: 300px; }
+        .output-label { color: #38bdf8; font-size: 11px; font-weight: bold; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+        .result-area { flex-grow: 1; background: #020617; color: #e2e8f0; border: 1px solid #1e293b; padding: 15px; font-family: 'Consolas', monospace; font-size: 12px; border-radius: 6px; outline: none; line-height: 1.6; resize: vertical; }
+        .copy-btn { background: #38bdf8; color: #020617; border: none; padding: 5px 12px; border-radius: 4px; font-size: 12px; cursor: pointer; font-weight: bold; }
+    </style>
+</head>
+<body onmousedown="globalClearSelection(event)">
+
+<header onmousedown="event.stopPropagation()">
+    <div id="tab-list" style="display: flex; gap: 8px;"></div>
+    <button class="add-category-btn" onclick="addCategory()">+ 카테고리 추가</button>
+    <button class="add-group-btn" onclick="addNewGroup()">+ 현재 탭에 표 추가</button>
+</header>
+
+<div id="master-container"></div>
+
+<script>
+    const STORAGE_KEY = 'GAME_MASTER_AUTO_CLEAR_V83';
+    let currentTab = "랜덤박스";
+    let categoryData = ["랜덤박스", "선택박스"];
+    let groupIdx = 0;
+    let isDragging = false;
+    let startCell = null;
+
+    window.onload = function() {
+        const saved = localStorage.getItem(STORAGE_KEY);
+        if (saved) {
+            try {
+                const data = JSON.parse(saved);
+                categoryData = data.categories || ["랜덤박스"];
+                currentTab = data.currentTab || categoryData[0];
+                renderTabs();
+                if (data.groups) data.groups.forEach(g => addNewGroup(g));
+            } catch(e) { renderTabs(); addNewGroup(); }
+        } else { renderTabs(); addNewGroup(); }
+        switchTab(currentTab);
+        window.addEventListener('mouseup', () => { isDragging = false; });
+    };
+
+    // [핵심 추가] 외부 영역 클릭 시 하이라이트 모두 제거
+    function globalClearSelection(e) {
+        if (!e.target.closest('td')) {
+            document.querySelectorAll('td.selected').forEach(td => td.classList.remove('selected'));
+        }
+    }
+
+    function renderTabs() {
+        const tabList = document.getElementById('tab-list');
+        tabList.innerHTML = '';
+        categoryData.forEach(cat => {
+            const btn = document.createElement('button');
+            btn.className = `tab-btn ${cat === currentTab ? 'active' : ''}`;
+            btn.innerHTML = `${cat}${categoryData.length > 1 ? `<span style="margin-left:8px;color:#f87171" onclick="deleteCategory(event, '${cat}')">✖</span>` : ''}`;
+            btn.onmousedown = (e) => e.stopPropagation(); // 탭 클릭 시 하이라이트 유지용
+            btn.onclick = () => switchTab(cat);
+            tabList.appendChild(btn);
+        });
+    }
+
+    function switchTab(name) {
+        currentTab = name;
+        renderTabs();
+        document.querySelectorAll('.group-wrap').forEach(g => {
+            g.classList.toggle('active-group', g.getAttribute('data-category') === name);
+        });
+        saveToLocal();
+    }
+
+    function addNewGroup(savedData = null) {
+        groupIdx++;
+        const id = `group-${groupIdx}`;
+        const targetCategory = savedData ? savedData.category : currentTab;
+        const div = document.createElement('div');
+        div.className = `group-wrap ${targetCategory === currentTab ? 'active-group' : ''}`;
+        div.id = id;
+        div.setAttribute('data-category', targetCategory);
+        div.onmousedown = (e) => e.stopPropagation(); // 그룹 내부 클릭 시 전역 클리어 방지
+        
+        div.innerHTML = `
+            <div class="main-layout">
+                <div class="input-section">
+                    <div class="toolbar">
+                        <button class="btn-tool" onclick="addRow('${id}')">+ 행 추가</button>
+                        <button class="btn-tool" onclick="addCol('${id}')">+ 열 추가</button>
+                        <button class="btn-tool" onclick="deleteLastCol('${id}')">- 열 삭제</button>
+                        <button class="btn-del-group" onclick="deleteGroup('${id}')">표 삭제</button>
+                    </div>
+                    <div class="table-wrapper">
+                        <table id="table-${id}">
+                            <thead id="h-${id}"></thead>
+                            <tbody id="b-${id}"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="output-section">
+                    <div class="output-label"><span>PIPE-LINE TEXT OUTPUT</span><button class="copy-btn" onclick="copyText('${id}')">복사</button></div>
+                    <textarea id="out-${id}" class="result-area" readonly spellcheck="false"></textarea>
+                </div>
+            </div>`;
+        document.getElementById('master-container').appendChild(div);
+        const hs = savedData ? savedData.headers : ["RES ID", "박스명", "상품명", "분류", "OBJ ID", "RES ID"];
+        document.getElementById(`h-${id}`).innerHTML = `<tr>${hs.map(h => `<th><input type="text" value="${h}" oninput="updateOutput('${id}')"></th>`).join('')}</tr>`;
+        if(savedData && savedData.rows) savedData.rows.forEach(r => addRow(id, r));
+        else for(let i=0; i<8; i++) addRow(id);
+        updateOutput(id);
+    }
+
+    function addRow(id, data = null) {
+        const body = document.getElementById(`b-${id}`);
+        const colCount = document.querySelectorAll(`#h-${id} th`).length;
+        const tr = document.createElement('tr');
+        for(let i=0; i<colCount; i++) {
+            const td = document.createElement('td');
+            const input = document.createElement('input');
+            input.type = "text";
+            input.value = data ? (data[i] || '') : '';
+            input.oninput = () => updateOutput(id);
+            input.addEventListener('mousedown', (e) => { e.stopPropagation(); handleMouseDown(e, id); });
+            input.addEventListener('mouseenter', (e) => handleMouseEnter(e, id));
+            input.addEventListener('keydown', (e) => handleKeyDown(e, id));
+            input.addEventListener('paste', (e) => handlePaste(e, id));
+            td.appendChild(input); tr.appendChild(td);
+        }
+        body.appendChild(tr); updateOutput(id);
+    }
+
+    function handleMouseDown(e, id) {
+        isDragging = true;
+        const td = e.target.closest('td');
+        if (!td) return;
+        startCell = { r: td.parentElement.rowIndex - 1, c: td.cellIndex };
+        
+        // 클릭 시 모든 하이라이트 제거 후 현재 클릭한 셀만 활성화
+        document.querySelectorAll('td.selected').forEach(cell => cell.classList.remove('selected'));
+        td.classList.add('selected');
+    }
+
+    function handleMouseEnter(e, id) {
+        if (!isDragging) return;
+        const td = e.target.closest('td');
+        if (!td) return;
+        const endCell = { r: td.parentElement.rowIndex - 1, c: td.cellIndex };
+        
+        // 드래그 중에는 실시간으로 범위 하이라이트
+        const tbody = document.getElementById(`b-${id}`);
+        const allTds = document.querySelectorAll('td.selected');
+        allTds.forEach(td => td.classList.remove('selected'));
+        
+        const minR = Math.min(startCell.r, endCell.r), maxR = Math.max(startCell.r, endCell.r);
+        const minC = Math.min(startCell.c, endCell.c), maxC = Math.max(startCell.c, endCell.c);
+        
+        for (let i = minR; i <= maxR; i++) {
+            for (let j = minC; j <= maxC; j++) { 
+                const cell = tbody.rows[i]?.cells[j];
+                if (cell) cell.classList.add('selected'); 
+            }
+        }
+    }
+
+    function handleKeyDown(e, id) {
+        const input = e.target;
+        const td = input.closest('td'), tr = td.parentElement;
+        const colIdx = td.cellIndex, rowIdx = tr.rowIndex - 1;
+        const tbody = document.getElementById(`b-${id}`);
+        const selectedCells = tbody.querySelectorAll('td.selected');
+
+        if (e.ctrlKey && e.key.toLowerCase() === 'c' && selectedCells.length > 1) {
+            e.preventDefault();
+            copySelectedArea(id, selectedCells);
+            return;
+        }
+        if ((e.key === 'Backspace' || e.key === 'Delete') && selectedCells.length > 1) {
+            e.preventDefault();
+            selectedCells.forEach(cell => { cell.querySelector('input').value = ''; });
+            updateOutput(id);
+            return;
+        }
+
+        // 방향키/엔터 이동 시 하이라이트 동기화 로직
+        let target = null;
+        if (e.key === 'ArrowUp' && rowIdx > 0) target = tbody.rows[rowIdx-1].cells[colIdx];
+        else if ((e.key === 'ArrowDown' || e.key === 'Enter') && rowIdx < tbody.rows.length-1) {
+            e.preventDefault(); target = tbody.rows[rowIdx+1].cells[colIdx];
+        }
+        else if (e.key === 'Enter' && rowIdx === tbody.rows.length-1) {
+            e.preventDefault(); addRow(id); target = tbody.rows[rowIdx+1].cells[colIdx];
+        }
+        else if (e.key === 'ArrowLeft' && input.selectionStart === 0 && colIdx > 0) target = tr.cells[colIdx-1];
+        else if (e.key === 'ArrowRight' && input.selectionEnd === input.value.length && colIdx < tr.cells.length-1) target = tr.cells[colIdx+1];
+
+        if (target) {
+            // 이동 시 기존 하이라이트 싹 지우고 새 타겟에만 부여
+            document.querySelectorAll('td.selected').forEach(c => c.classList.remove('selected'));
+            target.classList.add('selected');
+            
+            const nextInp = target.querySelector('input');
+            nextInp.focus(); setTimeout(() => nextInp.select(), 0);
+        }
+    }
+
+    // --- 나머지 유틸리티 로직 (이전과 동일) ---
+    function copySelectedArea(id, cells) {
+        const rows = document.getElementById(`b-${id}`).rows;
+        let minR = Infinity, maxR = -Infinity, minC = Infinity, maxC = -Infinity;
+        cells.forEach(cell => {
+            const r = cell.parentElement.rowIndex - 1, c = cell.cellIndex;
+            minR = Math.min(minR, r); maxR = Math.max(maxR, r);
+            minC = Math.min(minC, c); maxC = Math.max(maxC, c);
+        });
+        let copyStr = "";
+        for (let i = minR; i <= maxR; i++) {
+            let rowData = [];
+            for (let j = minC; j <= maxC; j++) { rowData.push(rows[i].cells[j].querySelector('input').value); }
+            copyStr += rowData.join('\t') + (i === maxR ? "" : "\n");
+        }
+        navigator.clipboard.writeText(copyStr);
+    }
+
+    function updateOutput(id) {
+        const hs = Array.from(document.querySelectorAll(`#h-${id} input`)).map(i => i.value);
+        const rows = document.getElementById(`b-${id}`).rows;
+        let res = `|${hs.join('|')}|\n`;
+        for(let tr of rows) {
+            const vals = Array.from(tr.querySelectorAll('input')).map(i => i.value);
+            if(vals.some(v => v.trim() !== '')) res += `|${vals.join('|')}|\n`;
+        }
+        document.getElementById(`out-${id}`).value = res;
+        saveToLocal();
+    }
+
+    function handlePaste(e, id) {
+        e.preventDefault();
+        const text = (e.clipboardData || window.clipboardData).getData('text');
+        const rows = text.split(/\r\n|\n|\r/);
+        const startTd = e.target.closest('td');
+        const startRowIdx = startTd.parentElement.rowIndex - 1, startColIdx = startTd.cellIndex;
+        rows.forEach((rowText, rOffset) => {
+            if(!rowText.trim() && rOffset !== 0) return;
+            const cols = rowText.split('\t');
+            let targetTr = document.getElementById(`b-${id}`).rows[startRowIdx + rOffset];
+            if(!targetTr && rowText.trim()) { addRow(id); targetTr = document.getElementById(`b-${id}`).rows[startRowIdx + rOffset]; }
+            cols.forEach((val, cOffset) => {
+                const targetTd = targetTr?.cells[startColIdx + cOffset];
+                if(targetTd) targetTd.querySelector('input').value = val;
+            });
+        });
+        updateOutput(id);
+    }
+
+    function saveToLocal() {
+        const gData = Array.from(document.querySelectorAll('.group-wrap')).map(g => ({
+            category: g.getAttribute('data-category'),
+            headers: Array.from(document.querySelectorAll(`#h-${g.id} input`)).map(i => i.value),
+            rows: Array.from(document.getElementById(`b-${g.id}`).rows).map(tr => Array.from(tr.querySelectorAll('input')).map(i => i.value))
+        }));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ categories: categoryData, currentTab, groups: gData }));
+    }
+
+    function addCol(id) {
+        document.querySelector(`#h-${id} tr`).insertAdjacentHTML('beforeend', `<th><input type="text" value="항목" oninput="updateOutput('${id}')"></th>`);
+        document.querySelectorAll(`#b-${id} tr`).forEach(tr => {
+            const td = document.createElement('td');
+            const input = document.createElement('input');
+            input.type = "text"; input.oninput = () => updateOutput(id);
+            input.addEventListener('mousedown', (e) => { e.stopPropagation(); handleMouseDown(e, id); });
+            input.addEventListener('mouseenter', (e) => handleMouseEnter(e, id));
+            input.addEventListener('keydown', (e) => handleKeyDown(e, id));
+            input.addEventListener('paste', (e) => handlePaste(e, id));
+            td.appendChild(input); tr.appendChild(td);
+        });
+        updateOutput(id);
+    }
+
+    function deleteLastCol(id) {
+        const hRow = document.querySelector(`#h-${id} tr`);
+        if(hRow.children.length > 1) {
+            hRow.removeChild(hRow.lastChild);
+            document.querySelectorAll(`#b-${id} tr`).forEach(tr => tr.removeChild(tr.lastChild));
+            updateOutput(id);
+        }
+    }
+
+    function deleteGroup(id) { if(confirm('표를 삭제하시겠습니까?')) { document.getElementById(id).remove(); saveToLocal(); } }
+    function copyText(id) { const el = document.getElementById(`out-${id}`); el.select(); document.execCommand('copy'); alert('복사되었습니다.'); }
+    function addCategory() { const name = prompt("새로운 카테고리 이름을 입력하세요:"); if (name && !categoryData.includes(name)) { categoryData.push(name); renderTabs(); switchTab(name); } }
+    function deleteCategory(e, name) { e.stopPropagation(); if (confirm(`'${name}' 카테고리를 삭제하시겠습니까?`)) { categoryData = categoryData.filter(c => c !== name); document.querySelectorAll(`.group-wrap[data-category="${name}"]`).forEach(g => g.remove()); if (currentTab === name) currentTab = categoryData[0]; renderTabs(); switchTab(currentTab); } }
+</script>
+
+</body>
+</html>
